@@ -9,7 +9,7 @@ authors = [
     {name = "Elif Sema Balcioglu", email = "elif.balcioglu@oracle.com"},
 ]
 dependencies = [
-    "autogen-core>=0.4.6",
+    "autogen-core>=0.4",
     "oracledb>=2.0.0",
 ]
 description = "Oracle Vector Store Integration with AutoGen"

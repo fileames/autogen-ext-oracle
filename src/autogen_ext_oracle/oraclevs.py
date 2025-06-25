@@ -78,18 +78,24 @@ def _handle_exceptions(func: T) -> T:
 # =============================================================================
 
 
-async def _get_connection(client: Any) -> Connection | None:
+async def _get_connection(client: Any) -> Connection | AsyncConnection | None:
     # check if AsyncConnectionPool exists
-    connection_pool_class = getattr(oracledb, "AsyncConnectionPool", None)
+    connection_pool_class_async = getattr(oracledb, "AsyncConnectionPool", None)
+    connection_pool_class_sync = getattr(oracledb, "ConnectionPool", None)
 
-    if isinstance(client, oracledb.AsyncConnection):
+    if isinstance(client, oracledb.AsyncConnection) or isinstance(client, oracledb.Connection):
         return client
-    elif connection_pool_class and isinstance(client, connection_pool_class):
+    elif connection_pool_class_async and isinstance(client, connection_pool_class_async):
         return await client.acquire()
+    elif connection_pool_class_sync and isinstance(client, connection_pool_class_sync):
+        return client.acquire()
     
     valid_types = "oracledb.AsyncConnection"
-    if connection_pool_class:
+    valid_types += " or oracledb.Connection"
+    if connection_pool_class_async:
         valid_types += " or oracledb.AsyncConnectionPool"
+    if connection_pool_class_sync:
+        valid_types += " or oracledb.ConnectionPool"
     raise TypeError(
         f"Expected client of type {valid_types}, got {type(client).__name__}"
     )
@@ -109,7 +115,7 @@ def _compare_version(version: str, target_version: str) -> bool:
     # If all parts equal so far, check if version has fewer parts than target_version
     return len(version_parts) < len(target_parts)
 
-def _validate_version(connection: Union[oracledb.AsyncConnection, oracledb.AsyncConnectionPool]):
+def _validate_version(connection: Union[oracledb.AsyncConnection, oracledb.Connection]):
     # Check python client driver version 2.2.0
     # As >2.2.0 JSON is supported 
     if _compare_version(oracledb.__version__, "2.0.0"):
@@ -123,9 +129,15 @@ def _validate_version(connection: Union[oracledb.AsyncConnection, oracledb.Async
             "Oracle DB python thin client driver version 2.1.0 not supported"
         )
 
-async def _table_exists(connection: Union[oracledb.AsyncConnection, oracledb.AsyncConnectionPool], table_name: str) -> bool:
+async def _table_exists(connection: Union[oracledb.AsyncConnection, oracledb.Connection], table_name: str) -> bool:
     try:
-        _ = await connection.fetchone(f"SELECT COUNT(*) FROM {table_name}")
+        query = f"SELECT COUNT(*) FROM {table_name}"
+        if isinstance(connection, oracledb.AsyncConnection):
+            _ = await connection.fetchone(query)
+        else:
+            with connection.cursor() as cursor:
+                cursor.execute(query)
+                _ = cursor.fetchone()
         return True
     except oracledb.DatabaseError as ex:
         err_obj = ex.args
@@ -133,24 +145,8 @@ async def _table_exists(connection: Union[oracledb.AsyncConnection, oracledb.Asy
             return False
         raise
 
-async def _get_clob_value(result: Any) -> str:
-    clob_value = ""
-    if result:
-        if isinstance(result, oracledb.AsyncLOB):
-            raw_data = await result.read()
-            if isinstance(raw_data, bytes):
-                clob_value = raw_data.decode(
-                    "utf-8"
-                )  # Specify the correct encoding
-            else:
-                clob_value = raw_data
-        elif isinstance(result, str):
-            clob_value = result
-        else:
-            raise Exception("Unexpected type:", type(result))
-    return clob_value
 
-async def _create_table(connection: Union[oracledb.AsyncConnection, oracledb.AsyncConnectionPool], table_name: str, modality: str, embedding_dim: int) -> None:
+async def _create_table(connection: Union[oracledb.AsyncConnection, oracledb.Connection], table_name: str, modality: str, embedding_dim: int) -> None:
 
     cols_dict = {
         "id": "RAW(16) DEFAULT SYS_GUID() PRIMARY KEY",
@@ -166,7 +162,12 @@ async def _create_table(connection: Union[oracledb.AsyncConnection, oracledb.Asy
                 f"{col_name} {col_type}" for col_name, col_type in cols_dict.items()
             )
         ddl = f"CREATE TABLE {table_name} ({ddl_body})"
-        await connection.execute(ddl)
+        if isinstance(connection, oracledb.AsyncConnection):
+            await connection.execute(ddl)
+        else:
+            with connection.cursor() as cursor:
+                cursor.execute(ddl)
+
         logger.info("Table created successfully...")
     else:
         logger.info("Table already exists...")
@@ -184,8 +185,8 @@ class FilterCondition(TypedDict):
 
 
 class FilterGroup(TypedDict, total=False):
-    _and: Optional[List[Union["FilterCondition", "FilterGroup"]]]
-    _or: Optional[List[Union["FilterCondition", "FilterGroup"]]]
+    _and: Optional[List[Union[FilterCondition, FilterGroup]]]
+    _or: Optional[List[Union[FilterCondition, FilterGroup]]]
 
 
 def _convert_oper_to_sql(oper: str) -> str:
@@ -230,7 +231,7 @@ def _generate_where_clause(db_filter: Union[FilterCondition, FilterGroup]) -> st
 # INDEXING UTILS
 # =============================================================================
 
-async def _index_exists(connection: Connection, index_name: str) -> bool:
+async def _index_exists(connection: Union[oracledb.AsyncConnection, oracledb.Connection], index_name: str) -> bool:
     # Check if the index exists
     query = """
         SELECT index_name 
@@ -239,8 +240,12 @@ async def _index_exists(connection: Connection, index_name: str) -> bool:
         """
     with connection.cursor() as cursor:
         # Execute the query
-        await cursor.execute(query, idx_name=index_name.upper())
-        result = await cursor.fetchone()
+        if isinstance(connection, oracledb.AsyncConnection):
+            await cursor.execute(query, idx_name=index_name.upper())
+            result = await cursor.fetchone()
+        else:
+            cursor.execute(query, idx_name=index_name.upper())
+            result = cursor.fetchone()
 
     return result is not None
 
@@ -324,7 +329,11 @@ async def _create_hnsw_index(
 
     # Check if the index exists
     if not await _index_exists(connection, config["idx_name"]):
-        await connection.execute(ddl)
+        if isinstance(connection, oracledb.AsyncConnection):
+            await connection.execute(ddl)
+        else:
+            with connection.cursor() as cursor:
+                cursor.execute(ddl)
         logger.info("Index created successfully...")
     else:
         logger.info("Index already exists...")
@@ -394,7 +403,12 @@ async def _create_ivf_index(
 
     # Check if the index exists
     if not await _index_exists(connection, config["idx_name"]):
-        await connection.execute(ddl)
+        if isinstance(connection, oracledb.AsyncConnection):
+            await connection.execute(ddl)
+        else:
+            with connection.cursor() as cursor:
+                cursor.execute(ddl)
+        
         logger.info("Index created successfully...")
     else:
         logger.info("Index already exists...")
@@ -411,16 +425,10 @@ def _extract_text(content_item: str | MemoryContent) -> str:
     content = content_item.content
     mime_type = content_item.mime_type
 
-    # TODO: Should we support markdown
-    if mime_type in [MemoryMimeType.TEXT]:#, MemoryMimeType.MARKDOWN]:
+    if mime_type in [MemoryMimeType.TEXT, MemoryMimeType.MARKDOWN]:
         return str(content)
     elif mime_type == MemoryMimeType.JSON:
-        if isinstance(content, dict):
-            # Store original JSON string representation
-            return str(content).lower()
-        raise ValueError("JSON content must be a dict")
-    elif isinstance(content, Image):
-        raise ValueError("Image content cannot be converted to text")
+        return json.dumps(content)
     else:
         raise ValueError(f"Unsupported content type: {mime_type}")
 
@@ -456,6 +464,7 @@ class OracleVSMemory(Memory, Component[OracleVSMemoryConfig]):
         self._modality = self._config.modality
         self._k = self._config.k
         self._connection = None
+        self._is_async = None
 
     @_handle_exceptions
     async def _ensure_initialized(self):
@@ -467,13 +476,38 @@ class OracleVSMemory(Memory, Component[OracleVSMemoryConfig]):
             raise ValueError("Failed to acquire a connection.")
         _validate_version(self._connection)
 
+        self._is_async = False
+        if isinstance(self._connection, oracledb.AsyncConnection):
+            self._is_async = True
+
         if self._proxy:
+            query = "begin utl_http.set_proxy(:proxy); end;"
             with self._connection.cursor() as cursor:
-                await cursor.execute(
-                    "begin utl_http.set_proxy(:proxy); end;", proxy=self._proxy
+                (await cursor.execute(
+                    query, proxy=self._proxy
+                )) if self._is_async else cursor.execute(
+                    query, proxy=self._proxy
                 )
 
         await _create_table(self._connection, self._table_name, self._modality, await self._get_embedding_dimension())
+
+    @_handle_exceptions
+    async def _get_clob_value(self, result: Any) -> str:
+        clob_value = ""
+        if result:
+            if isinstance(result, oracledb.AsyncLOB):
+                raw_data = (await result.read()) if self._is_async else result.read()
+                if isinstance(raw_data, bytes):
+                    clob_value = raw_data.decode(
+                        "utf-8"
+                    )  # Specify the correct encoding
+                else:
+                    clob_value = raw_data
+            elif isinstance(result, str):
+                clob_value = result
+            else:
+                raise Exception("Unexpected type:", type(result))
+        return clob_value
 
     @_handle_exceptions
     async def _get_embedding_dimension(self):
@@ -492,12 +526,17 @@ class OracleVSMemory(Memory, Component[OracleVSMemoryConfig]):
         with self._connection.cursor() as cursor:
             cursor.setinputsizes(None, oracledb.DB_TYPE_JSON)
 
-            await cursor.execute(
-                f"SELECT dbms_vector_chain.utl_to_embedding(:1, {"'image'," if self._modality=="IMAGE" else ""} json(:2))",
+            query = f"SELECT dbms_vector_chain.utl_to_embedding(:1, {"'image'," if self._modality=="IMAGE" else ""} json(:2))"
+
+            (await cursor.execute(
+                query,
+                (model_input, self._params),
+            )) if self._is_async else cursor.execute(
+                query,
                 (model_input, self._params),
             )
 
-            res = await cursor.fetchone()
+            res = (await cursor.fetchone()) if self._is_async else cursor.fetchone()
 
         self._embedding_dimension = len(res[0])
         return self._embedding_dimension
@@ -546,9 +585,8 @@ class OracleVSMemory(Memory, Component[OracleVSMemoryConfig]):
             img = content.content.image
             img.save(buffered, format="JPEG")
             model_input = buffered.getvalue()
-
-        elif content.mime_type == MemoryMimeType.TEXT and self._modality == "TEXT": 
-            model_input = content.content
+        elif self._modality == "TEXT": 
+            model_input = _extract_text(content)
         else:
             raise ValueError("Only text and image supported, also must match")
 
@@ -556,11 +594,17 @@ class OracleVSMemory(Memory, Component[OracleVSMemoryConfig]):
 
         with self._connection.cursor() as cursor:
             cursor.setinputsizes(None, None, oracledb.DB_TYPE_JSON, oracledb.DB_TYPE_JSON, None)
-            await cursor.execute(
-                f"INSERT INTO {self._table_name} (id, embedding, metadata, model_input) VALUES (:1, dbms_vector_chain.utl_to_embedding(:2,{"'image'," if self._modality=="IMAGE" else ""} json(:3)), :4, :5)",
+
+            query = f"INSERT INTO {self._table_name} (id, embedding, metadata, model_input) VALUES (:1, dbms_vector_chain.utl_to_embedding(:2,{"'image'," if self._modality=="IMAGE" else ""} json(:3)), :4, :5)"
+            (await cursor.execute(
+                query,
+                [db_id, model_input, self._params, {**content.metadata, "mime_type": content.mime_type.value},  model_input],
+            )) if self._is_async else cursor.execute(
+                query,
                 [db_id, model_input, self._params, {**content.metadata, "mime_type": content.mime_type.value},  model_input],
             )
-            await self._connection.commit()
+
+            (await self._connection.commit()) if self._is_async else self._connection.commit()
 
     @_handle_exceptions
     async def query(
@@ -578,16 +622,16 @@ class OracleVSMemory(Memory, Component[OracleVSMemoryConfig]):
             logger.info("Message query cancelled by token.")
             return MemoryQueryResult(results=[]) 
 
-        if isinstance(query,str) or (content.mime_type == MemoryMimeType.TEXT and self._modality == "TEXT"): 
-            model_input = _extract_text(query)
-
-        elif content.mime_type == MemoryMimeType.IMAGE and self._modality == "IMAGE":
+        if self._modality == "IMAGE":
             # add with utl_embedding
+            if not (isinstance(query,MemoryContent) and query.content.mime_type == MemoryMimeType.IMAGE):
+                raise ValueError("NOT CORRECT TYPE")
             buffered = BytesIO()
             img = query.content.image
             img.save(buffered, format="JPEG")
             model_input = buffered.getvalue()
-
+        elif self._modality == "TEXT": 
+            model_input = _extract_text(query)
         else:
             raise ValueError("NOT CORRECT TYPE")
 
@@ -596,7 +640,8 @@ class OracleVSMemory(Memory, Component[OracleVSMemoryConfig]):
 
         with self._connection.cursor() as cursor:
             cursor.setinputsizes(None, oracledb.DB_TYPE_JSON)
-            await cursor.execute(f"""
+
+            query = f"""
             SELECT id,
                 model_input,
                 metadata,
@@ -605,9 +650,11 @@ class OracleVSMemory(Memory, Component[OracleVSMemoryConfig]):
             {f"WHERE {where_clause}" if filter is not None else ""}
             ORDER BY distance
             FETCH APPROX FIRST {self._k} ROWS ONLY
-            """, [model_input, self._params])
+            """
 
-            results = await cursor.fetchall()
+            (await cursor.execute(query, [model_input, self._params])) if self._is_async else cursor.execute(query, [model_input, self._params])
+
+            results = (await cursor.fetchall()) if self._is_async else cursor.fetchall()
 
             memory_results: List[MemoryContent] = []
 
@@ -622,8 +669,10 @@ class OracleVSMemory(Memory, Component[OracleVSMemoryConfig]):
 
                 del metadata["mime_type"]
 
-                if mime_type == MemoryMimeType.TEXT:
-                    doc = await _get_clob_value(result[1])
+                if mime_type in [MemoryMimeType.TEXT, MemoryMimeType.MARKDOWN]:
+                    doc = await self._get_clob_value(result[1])
+                if mime_type == MemoryMimeType.JSON:
+                    doc = json.loads(await self._get_clob_value(result[1]))
                 elif mime_type == MemoryMimeType.IMAGE:
                     raise NotImplementedError
 
@@ -671,7 +720,13 @@ class OracleVSMemory(Memory, Component[OracleVSMemoryConfig]):
     @_handle_exceptions
     async def clear(self) -> None:
         await self._ensure_initialized()
-        await self._connection.execute(f"TRUNCATE TABLE {self._table_name}")
+        query = f"TRUNCATE TABLE {self._table_name}"
+        if self._is_async:
+            await self._connection.execute(query)
+        else:
+            with self._connection.cursor() as cursor:
+                cursor.execute(query)
+
 
     @_handle_exceptions
     async def close(self) -> None:
@@ -679,7 +734,7 @@ class OracleVSMemory(Memory, Component[OracleVSMemoryConfig]):
         await self._ensure_initialized()
 
         if isinstance(self._config.client, getattr(oracledb, "AsyncConnectionPool", None)):
-            await self._config.client.release(self._connection)
+            (await self._config.client.release(self._connection)) if self._is_async else self._config.client.release(self._connection)
 
     def _to_config(self) -> OracleVSMemoryConfig:
         """Serialize the memory configuration."""

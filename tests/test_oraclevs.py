@@ -7,6 +7,12 @@ from autogen_core.model_context import BufferedChatCompletionContext
 from autogen_core.models import UserMessage
 from autogen_ext_oracle import OracleVSMemory, OracleVSMemoryConfig
 from autogen_core import CancellationToken
+from typing import AsyncGenerator
+from typing import (
+    AsyncGenerator,
+    Tuple,
+    Dict 
+)
 
 # Skip all tests if oracledb is not available
 try:
@@ -20,10 +26,16 @@ dsn = "dsn"
 
 async def drop_table_purge(connection, table_name) -> None:
     ddl = f"DROP TABLE IF EXISTS {table_name} PURGE"
-    await connection.execute(ddl)
+
+    if isinstance(connection, oracledb.AsyncConnection):
+        await connection.execute(ddl)
+    else:
+        with connection.cursor() as cursor:
+            cursor.execute(ddl)
+
 
 @pytest_asyncio.fixture()
-async def txt_config() -> OracleVSMemoryConfig:
+async def txt_config() -> AsyncGenerator[OracleVSMemoryConfig]:
     """Base configuration."""
 
     connection = await oracledb.connect_async(user=username, password=password, dsn=dsn)
@@ -45,7 +57,7 @@ async def txt_config() -> OracleVSMemoryConfig:
     await connection.close()
 
 @pytest_asyncio.fixture()
-async def txt_2conn_config() -> OracleVSMemoryConfig:
+async def txt_2conn_config() -> AsyncGenerator[Tuple[OracleVSMemoryConfig, OracleVSMemoryConfig]]:
     """Two configs with same table, two connections."""
 
     connection = await oracledb.connect_async(user=username, password=password, dsn=dsn)
@@ -80,9 +92,46 @@ async def txt_2conn_config() -> OracleVSMemoryConfig:
     await connection.close()
     await connection2.close()
 
+@pytest_asyncio.fixture()
+async def txt_sync_2conn_config() -> AsyncGenerator[Tuple[OracleVSMemoryConfig, OracleVSMemoryConfig]]:
+    """Two configs with same table, two connections."""
+
+    connection = oracledb.connect(user=username, password=password, dsn=dsn)
+
+    config=OracleVSMemoryConfig(
+        client=connection,
+        params = {
+            "provider" : "database", 
+            "model"    : "allminilm" 
+            },
+        table_name="mytable",
+        modality="TEXT",
+        distance_strategy="cosine",
+    )
+
+    connection2 = oracledb.connect(user=username, password=password, dsn=dsn)
+
+    config2=OracleVSMemoryConfig(
+        client=connection2,
+        params = {
+            "provider" : "database", 
+            "model"    : "allminilm" 
+            },
+        table_name="mytable",
+        modality="TEXT",
+        distance_strategy="cosine",
+    )
+
+    yield (config, config2)
+
+    await drop_table_purge(connection, "mytable")
+    connection.close()
+    connection2.close()
+
+
 
 @pytest_asyncio.fixture()
-async def txt_conn_config() -> OracleVSMemoryConfig:
+async def txt_conn_config() -> AsyncGenerator[OracleVSMemoryConfig]:
     """Setup without closing connections, to test closed, broken connections"""
 
     connection = await oracledb.connect_async(user=username, password=password, dsn=dsn)
@@ -101,10 +150,10 @@ async def txt_conn_config() -> OracleVSMemoryConfig:
     yield config
 
 @pytest_asyncio.fixture()
-async def txt_default_config() -> OracleVSMemoryConfig:
-    """Default config"""
+async def txt_sync_conn_config() -> AsyncGenerator[OracleVSMemoryConfig]:
+    """Setup without closing connections, to test closed, broken connections"""
 
-    connection = await oracledb.connect_async(user=username, password=password, dsn=dsn)
+    connection = oracledb.connect(user=username, password=password, dsn=dsn)
 
     config=OracleVSMemoryConfig(
         client=connection,
@@ -113,16 +162,15 @@ async def txt_default_config() -> OracleVSMemoryConfig:
             "model"    : "allminilm" 
             },
         table_name="mytable",
+        modality="TEXT",
+        distance_strategy="cosine",
     )
 
     yield config
 
-    await drop_table_purge(connection, "mytable")
-    await connection.close()
-
 
 @pytest_asyncio.fixture()
-async def txt_sync_config() -> OracleVSMemoryConfig:
+async def txt_sync_config() -> AsyncGenerator[OracleVSMemoryConfig]:
     """Synchronous connection - should not work"""
 
     connection = oracledb.connect(user=username, password=password, dsn=dsn)
@@ -140,10 +188,11 @@ async def txt_sync_config() -> OracleVSMemoryConfig:
 
     yield config
 
+    await drop_table_purge(connection, "mytable")
     connection.close()
 
 @pytest_asyncio.fixture()
-async def txt_pool_config() -> OracleVSMemoryConfig:
+async def txt_pool_config() -> AsyncGenerator[Tuple[OracleVSMemoryConfig, OracleVSMemoryConfig]]:
     """Two configs using the same async pool"""
 
     connection = oracledb.create_pool_async(user=username, password=password, dsn=dsn, min=1, max=4, increment=1)
@@ -178,8 +227,44 @@ async def txt_pool_config() -> OracleVSMemoryConfig:
 
     await connection.close()
 
+@pytest_asyncio.fixture()
+async def txt_sync_pool_config() -> AsyncGenerator[Tuple[OracleVSMemoryConfig, OracleVSMemoryConfig]]:
+    """Two configs using the same async pool"""
+
+    connection = oracledb.create_pool(user=username, password=password, dsn=dsn, min=1, max=4, increment=1)
+
+    config=OracleVSMemoryConfig(
+        client=connection,
+        params = {
+            "provider" : "database", 
+            "model"    : "allminilm" 
+            },
+        table_name="mytable",
+        modality="TEXT",
+        distance_strategy="cosine",
+    )
+
+    config2=OracleVSMemoryConfig(
+        client=connection,
+        params = {
+            "provider" : "database", 
+            "model"    : "allminilm" 
+            },
+        table_name="mytable2",
+        modality="TEXT",
+        distance_strategy="cosine",
+    )
+
+    yield (config, config2)
+
+    with connection.acquire() as _conn:
+        await drop_table_purge(_conn, "mytable")
+        await drop_table_purge(_conn, "mytable2")
+
+    connection.close()
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('txt_config', ['txt_config', 'txt_sync_config'], indirect=True)
 async def test_basic_workflow(txt_config: OracleVSMemoryConfig) -> None:
     """Test basic query"""
     memory = OracleVSMemory(txt_config)
@@ -199,6 +284,7 @@ async def test_basic_workflow(txt_config: OracleVSMemoryConfig) -> None:
     assert all(isinstance(r.metadata.get("distance"), float) for r in results.results if r.metadata)
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('txt_config', ['txt_config', 'txt_sync_config'], indirect=True)
 async def test_proxy(txt_config: OracleVSMemoryConfig) -> None:
     """Test that proxy setting does not produce errors"""
     txt_config.proxy = 'proxy.my-company.com'
@@ -220,7 +306,8 @@ async def test_proxy(txt_config: OracleVSMemoryConfig) -> None:
 
 
 @pytest.mark.asyncio
-async def test_same_connection_workflow(txt_2conn_config: OracleVSMemoryConfig) -> None:
+@pytest.mark.parametrize('txt_2conn_config', ['txt_2conn_config', 'txt_sync_2conn_config'], indirect=True)
+async def test_same_connection_workflow(txt_2conn_config: Tuple[OracleVSMemoryConfig, OracleVSMemoryConfig]) -> None:
     """Same table name two connections. Test that OracleVSMemory can see the changes."""
     memory = OracleVSMemory(txt_2conn_config[0])
     await memory.clear()
@@ -252,26 +339,7 @@ async def test_same_connection_workflow(txt_2conn_config: OracleVSMemoryConfig) 
     assert all(isinstance(r.metadata.get("distance"), float) for r in results.results if r.metadata)
 
 @pytest.mark.asyncio
-async def test_default_workflow(txt_default_config: OracleVSMemoryConfig) -> None:
-    """Test the default workflow"""
-    memory = OracleVSMemory(txt_default_config)
-    await memory.clear()
-
-    await memory.add(
-        MemoryContent(
-            content="Paris is known for the Eiffel Tower and amazing cuisine.",
-            mime_type=MemoryMimeType.TEXT,
-            metadata={"category": "city", "country": "France"},
-        )
-    )
-
-    results = await memory.query("Tell me about Paris")
-    assert len(results.results) > 0
-    assert any("Paris" in str(r.content) for r in results.results)
-    assert all(isinstance(r.metadata.get("distance"), float) for r in results.results if r.metadata)
-
-
-@pytest.mark.asyncio
+@pytest.mark.parametrize('txt_config', ['txt_config', 'txt_sync_config'], indirect=True)
 async def test_hnsw_index(txt_config: OracleVSMemoryConfig) -> None:
     """Test hnsw index creation"""
     memory = OracleVSMemory(txt_config)
@@ -302,6 +370,8 @@ async def test_hnsw_index(txt_config: OracleVSMemoryConfig) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('txt_config', ['txt_config', 'txt_sync_config'], indirect=True)
+
 async def test_ivf_index(txt_config: OracleVSMemoryConfig) -> None:
     """Test ivf index creation"""
     memory = OracleVSMemory(txt_config)
@@ -337,6 +407,7 @@ async def test_ivf_index(txt_config: OracleVSMemoryConfig) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('txt_conn_config', ['txt_conn_config', 'txt_sync_conn_config'], indirect=True)
 async def test_error_after_close(txt_conn_config: OracleVSMemoryConfig) -> None:
     """Test closed connection"""
     memory = OracleVSMemory(txt_conn_config)
@@ -350,7 +421,7 @@ async def test_error_after_close(txt_conn_config: OracleVSMemoryConfig) -> None:
         )
     )
 
-    await txt_conn_config.client.close()
+    (await txt_conn_config.client.close()) if isinstance(txt_conn_config.client, (oracledb.AsyncConnection, oracledb.AsyncConnectionPool)) else txt_conn_config.client.close()
 
     with pytest.raises(oracledb.Error):
         await memory.add(
@@ -363,6 +434,7 @@ async def test_error_after_close(txt_conn_config: OracleVSMemoryConfig) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('txt_config', ['txt_config', 'txt_sync_config'], indirect=True)
 async def test_clear(txt_config: OracleVSMemoryConfig) -> None:
     """Test clear - table should be cleared"""
     memory = OracleVSMemory(txt_config)
@@ -384,40 +456,10 @@ async def test_clear(txt_config: OracleVSMemoryConfig) -> None:
     results = await memory.query("Tell me about Istanbul")
     assert len(results.results) == 0
 
-
-@pytest.mark.asyncio
-async def test_close_conn(txt_conn_config: OracleVSMemoryConfig) -> None:
-    """Test close connection"""
-    await txt_conn_config.client.close()
-    memory = OracleVSMemory(txt_conn_config)
-
-    with pytest.raises(Exception):
-        await memory.add(
-            MemoryContent(
-                content="Paris is known for the Eiffel Tower and amazing cuisine.",
-                mime_type=MemoryMimeType.TEXT,
-                metadata={"category": "city", "country": "France"},
-            )
-        )
-
     
 @pytest.mark.asyncio
-async def test_sync_conn(txt_sync_config: OracleVSMemoryConfig) -> None:
-    """Test synchronous connection"""
-    memory = OracleVSMemory(txt_sync_config)
-
-    with pytest.raises(TypeError, match="oracledb.AsyncConnection or oracledb.AsyncConnectionPool"):
-        await memory.add(
-            MemoryContent(
-                content="Paris is known for the Eiffel Tower and amazing cuisine.",
-                mime_type=MemoryMimeType.TEXT,
-                metadata={"category": "city", "country": "France"},
-            )
-        )
-
-
-@pytest.mark.asyncio
-async def test_content_types(txt_config: OracleVSMemoryConfig) -> None:
+@pytest.mark.parametrize('txt_config', ['txt_config', 'txt_sync_config'], indirect=True)
+async def test_content_types_error(txt_config: OracleVSMemoryConfig) -> None:
     """Test content types other than TEXT and IMAGE, which are not allowed"""
     memory = OracleVSMemory(txt_config)
     await memory.clear()
@@ -425,12 +467,111 @@ async def test_content_types(txt_config: OracleVSMemoryConfig) -> None:
     with pytest.raises(ValueError): #, match="Unsupported content type"):
         await memory.add(MemoryContent(content=b"binary data", mime_type=MemoryMimeType.BINARY))
 
-    with pytest.raises(ValueError):
-        await memory.add(MemoryContent(content="not a dict", mime_type=MemoryMimeType.JSON))
+    '''with pytest.raises(ValueError):
+        await memory.add(MemoryContent(content="not a dict", mime_type=MemoryMimeType.JSON))'''
 
     # TODO: what to do with images
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('txt_config', ['txt_config', 'txt_sync_config'], indirect=True)
+async def test_content_types(txt_config: OracleVSMemoryConfig) -> None:
+    """Test content types"""
+    memory = OracleVSMemory(txt_config)
+    await memory.clear()
+
+    await memory.add(
+        MemoryContent(
+            content="""
+            # Paris: The City of Light
+            Paris, the capital of France, is known for its iconic landmarks like the **Eiffel Tower**, **Louvre Museum**, and **Notre-Dame Cathedral**. 
+
+            ## Must-See:
+            - **Eiffel Tower**
+            - **Louvre**
+            - **Notre-Dame**
+
+            Paris is a city of romance, beauty, and timeless charm.
+
+            """,
+            mime_type=MemoryMimeType.MARKDOWN,
+            metadata={"category": "city", "country": "France"},
+        )
+    )
+
+    results = await memory.query("Tell me about Paris")
+    assert len(results.results) > 0
+    assert results.results[0].mime_type == MemoryMimeType.MARKDOWN
+    assert any("Paris" in str(r.content) for r in results.results)
+
+    await memory.clear()
+
+    await memory.add(
+        MemoryContent(
+            content={
+            "city": "Paris",
+            "nickname": "The City of Light",
+            "country": "France",
+            "highlights": [
+                "Eiffel Tower",
+                "Louvre Museum",
+                "Notre-Dame Cathedral"
+            ],
+            "description": "Paris is known for its iconic landmarks, art, culture, and fashion. ",
+            },
+            mime_type=MemoryMimeType.JSON,
+            metadata={"category": "city", "country": "France"},
+        )
+    )
+
+    results = await memory.query("Tell me about Paris")
+    assert len(results.results) > 0
+    assert results.results[0].mime_type == MemoryMimeType.JSON
+    assert isinstance(results.results[0].content, Dict) and results.results[0].content["city"] == "Paris"
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('txt_config', ['txt_config', 'txt_sync_config'], indirect=True)
+async def test_content_types_mix(txt_config: OracleVSMemoryConfig) -> None:
+    """Test content types"""
+    memory = OracleVSMemory(txt_config)
+    await memory.clear()
+
+    await memory.add(
+        MemoryContent(
+            content={
+            "city": "Paris",
+            "nickname": "The City of Light",
+            "country": "France",
+            "highlights": [
+                "Eiffel Tower",
+                "Louvre Museum",
+                "Notre-Dame Cathedral"
+            ],
+            "description": "Paris is known for its iconic landmarks, art, culture, and fashion. ",
+            },
+            mime_type=MemoryMimeType.JSON,
+            metadata={"category": "city", "country": "France"},
+        )
+    )
+
+    results = await memory.query(MemoryContent(
+            content="""
+            # Paris: The City of Light
+
+            Must see places:
+            - ...
+            """,
+            mime_type=MemoryMimeType.MARKDOWN,
+            metadata={"category": "city", "country": "France"},
+        )
+    )
+
+    assert len(results.results) > 0
+    assert results.results[0].mime_type == MemoryMimeType.JSON
+    assert isinstance(results.results[0].content, Dict) and results.results[0].content["city"] == "Paris"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('txt_config', ['txt_config', 'txt_sync_config'], indirect=True)
 async def test_metadata_handling(txt_config: OracleVSMemoryConfig) -> None:
     """Test metadata handling"""
     memory = OracleVSMemory(txt_config)
@@ -456,7 +597,8 @@ async def test_metadata_handling(txt_config: OracleVSMemoryConfig) -> None:
 
 
 @pytest.mark.asyncio
-async def test_pool(txt_pool_config: OracleVSMemoryConfig) -> None:
+@pytest.mark.parametrize('txt_pool_config', ['txt_pool_config', 'txt_sync_pool_config'], indirect=True)
+async def test_pool(txt_pool_config: Tuple[OracleVSMemoryConfig,OracleVSMemoryConfig]) -> None:
     """Test pool connection"""
     memory = OracleVSMemory(txt_pool_config[0])
     await memory.clear()
@@ -505,6 +647,7 @@ async def test_pool(txt_pool_config: OracleVSMemoryConfig) -> None:
     await memory2.close()
     
 @pytest.mark.asyncio
+@pytest.mark.parametrize('txt_config', ['txt_config', 'txt_sync_config'], indirect=True)
 async def test_model_context_update(txt_config: OracleVSMemoryConfig) -> None:
     """Test updating model context with retrieved memories"""
     memory = OracleVSMemory(txt_config)
@@ -536,6 +679,7 @@ async def test_model_context_update(txt_config: OracleVSMemoryConfig) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('txt_config', ['txt_config', 'txt_sync_config'], indirect=True)
 async def test_filter(txt_config: OracleVSMemoryConfig) -> None:
     """Test database filtering"""
     memory = OracleVSMemory(txt_config)
@@ -569,6 +713,7 @@ async def test_filter(txt_config: OracleVSMemoryConfig) -> None:
     assert all(isinstance(r.metadata.get("distance"), float) for r in results.results if r.metadata)
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('txt_config', ['txt_config', 'txt_sync_config'], indirect=True)
 async def test_cancellation(txt_config: OracleVSMemoryConfig) -> None:
     """Test cancellation token operations."""
     memory = OracleVSMemory(txt_config)

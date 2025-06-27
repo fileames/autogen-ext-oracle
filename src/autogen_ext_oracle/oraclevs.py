@@ -28,7 +28,6 @@ from autogen_core.model_context import ChatCompletionContext
 from autogen_core.models import SystemMessage
 import numpy as np
 from pydantic import BaseModel, Field
-from PIL import Image as PILImage
 from autogen_core import Image
 
 
@@ -400,7 +399,14 @@ async def _create_ivf_index(
     else:
         logger.info("Index already exists...")
 
-async def _image_to_lob(connection: Union[oracledb.AsyncConnection, oracledb.Connection], img: PILImage) -> oracledb.LOB | oracledb.AsyncLOB:
+async def _image_to_lob(connection: Union[oracledb.AsyncConnection, oracledb.Connection], img: Any) -> oracledb.LOB | oracledb.AsyncLOB:
+
+    try:
+        from PIL import Image as PILImage
+    except ImportError as e:
+        raise ImportError(
+            "Unable to import Pillow. It is required for image operations. Install with `pip install pillow`."
+        ) from e
 
     buffered = io.BytesIO()
     img.save(buffered, format="JPEG")
@@ -517,6 +523,14 @@ class OracleVSMemory(Memory, Component[OracleVSMemoryConfig]):
 
     @_handle_exceptions
     async def _get_embedding_dimension(self):
+
+        if self._modality == "IMAGE":
+            try:
+                from PIL import Image as PILImage
+            except ImportError as e:
+                raise ImportError(
+                    "Unable to import Pillow. It is required for image operations. Install with `pip install pillow`."
+                ) from e
 
         if self._embedding_dimension != None:
             return self._embedding_dimension
@@ -675,6 +689,13 @@ class OracleVSMemory(Memory, Component[OracleVSMemoryConfig]):
                 if mime_type == MemoryMimeType.JSON:
                     doc = json.loads(await self._get_clob_value(result[1]))
                 elif mime_type == MemoryMimeType.IMAGE:
+                    try:
+                        from PIL import Image as PILImage
+                    except ImportError as e:
+                        raise ImportError(
+                            "Unable to import Pillow. It is required for image operations. Install with `pip install pillow`."
+                        ) from e
+
                     # TODO: Should we expect images smaller than 1GB always - https://python-oracledb.readthedocs.io/en/latest/user_guide/lob_data.html#streaming-lobs-read
                     image_bytes = b""
                     offset = 1

@@ -5,6 +5,7 @@ import functools
 import hashlib
 import json
 import os
+import io
 
 from typing import (
     TYPE_CHECKING,
@@ -27,6 +28,8 @@ from autogen_core.model_context import ChatCompletionContext
 from autogen_core.models import SystemMessage
 import numpy as np
 from pydantic import BaseModel, Field
+from PIL import Image as PILImage
+from autogen_core import Image
 
 
 try:
@@ -36,9 +39,6 @@ except ImportError as e:
         "Unable to import oracledb, please install with "
         "`pip install -U oracledb`."
     ) from e
-
-if TYPE_CHECKING:
-    from oracledb import Connection
 
 
 logger = logging.getLogger(__name__)
@@ -78,7 +78,7 @@ def _handle_exceptions(func: T) -> T:
 # =============================================================================
 
 
-async def _get_connection(client: Any) -> Connection | AsyncConnection | None:
+async def _get_connection(client: Any) -> oracledb.Connection | oracledb.AsyncConnection | None:
     # check if AsyncConnectionPool exists
     connection_pool_class_async = getattr(oracledb, "AsyncConnectionPool", None)
     connection_pool_class_sync = getattr(oracledb, "ConnectionPool", None)
@@ -115,19 +115,6 @@ def _compare_version(version: str, target_version: str) -> bool:
     # If all parts equal so far, check if version has fewer parts than target_version
     return len(version_parts) < len(target_parts)
 
-def _validate_version(connection: Union[oracledb.AsyncConnection, oracledb.Connection]):
-    # Check python client driver version 2.2.0
-    # As >2.2.0 JSON is supported 
-    if _compare_version(oracledb.__version__, "2.0.0"):
-        raise Exception(
-            f"Oracle DB python client driver version {oracledb.__version__} not supported, must be >=2.0.0 for async connection"
-        )
-
-    # WHY
-    if oracledb.__version__ == "2.1.0":
-        raise Exception(
-            "Oracle DB python thin client driver version 2.1.0 not supported"
-        )
 
 async def _table_exists(connection: Union[oracledb.AsyncConnection, oracledb.Connection], table_name: str) -> bool:
     try:
@@ -254,7 +241,7 @@ def _get_index_name(base_name: str) -> str:
     return f"{base_name}_{unique_id}"
 
 async def _create_hnsw_index(
-    connection: Connection,
+    connection: Union[oracledb.AsyncConnection, oracledb.Connection],
     table_name: str,
     distance_strategy: DistanceStrategy,
     params: Optional[dict[str, Any]] = None,
@@ -340,7 +327,7 @@ async def _create_hnsw_index(
 
 
 async def _create_ivf_index(
-    connection: Connection,
+    connection: Union[oracledb.AsyncConnection, oracledb.Connection],
     table_name: str,
     distance_strategy: DistanceStrategy,
     params: Optional[dict[str, Any]] = None,
@@ -413,6 +400,15 @@ async def _create_ivf_index(
     else:
         logger.info("Index already exists...")
 
+async def _image_to_lob(connection: Union[oracledb.AsyncConnection, oracledb.Connection], img: PILImage) -> oracledb.LOB | oracledb.AsyncLOB:
+
+    buffered = io.BytesIO()
+    img.save(buffered, format="JPEG")
+    byte_image = buffered.getvalue()
+    lob = (await connection.createlob(oracledb.DB_TYPE_BLOB, byte_image)) if isinstance(connection, oracledb.AsyncConnection) else connection.createlob(oracledb.DB_TYPE_BLOB, byte_image)
+
+    return lob
+
 # =============================================================================
 # AUTOGEN UTILS
 # =============================================================================
@@ -441,7 +437,7 @@ class OracleVSMemoryConfig(BaseModel):
     client: Any 
     params: Dict[str, str| int] #https://docs.oracle.com/en/database/oracle/oracle-database/23/arpls/dbms_vector_chain1.html#GUID-C6439E94-4E86-4ECD-954E-4B73D53579DE
     table_name: str
-    modality: Literal["TEXT"] = Field(default="TEXT", description="Modality of the model, IMAGE or TEXT")
+    modality: Literal["TEXT", "IMAGE"] = Field(default="TEXT", description="Modality of the model, IMAGE or TEXT")
     distance_strategy: Literal["dot", "euclidean", "cosine"] = Field(default="cosine", description="Distance metric for similarity search")
     k: int = Field(default=3, description="Number of results to return in queries")
     proxy: Optional[str | None] = Field(default=None, description="Proxy for external providers")
@@ -474,7 +470,17 @@ class OracleVSMemory(Memory, Component[OracleVSMemoryConfig]):
         self._connection = await _get_connection(self._config.client)
         if self._connection is None:
             raise ValueError("Failed to acquire a connection.")
-        _validate_version(self._connection)
+
+        if _compare_version(oracledb.__version__, "2.2.0"):
+            raise Exception(
+                f"Oracle DB python client driver version {oracledb.__version__} not supported, must be >=2.2.0 for vector support"
+            )
+
+        if not(hasattr(self._connection, "thin") and self._connection.thin):
+            if oracledb.clientversion()[:2] < (23,4):
+                raise Exception(
+                    f"Oracle DB client driver version {oracledb.__version__} not supported, must be >=23.4 for vector support"
+                )
 
         self._is_async = False
         if isinstance(self._connection, oracledb.AsyncConnection):
@@ -516,24 +522,25 @@ class OracleVSMemory(Memory, Component[OracleVSMemoryConfig]):
             return self._embedding_dimension
 
         ex_query = "Hello"
-        ex_img_data = b'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAAEElEQVR4nGK6brUBEAAA//8DtQHEz4SpmwAAAABJRU5ErkJggg=='
-
         model_input = ex_query
 
         if self._modality == "IMAGE": 
+            img = PILImage.new("RGB", (10, 10))
+            ex_img_data = await _image_to_lob(self._connection, img)
             model_input = ex_img_data
 
         with self._connection.cursor() as cursor:
             cursor.setinputsizes(None, oracledb.DB_TYPE_JSON)
 
             query = f"SELECT dbms_vector_chain.utl_to_embedding(:1, {"'image'," if self._modality=="IMAGE" else ""} json(:2))"
+            bind_input = [model_input, self._params]
 
             (await cursor.execute(
                 query,
-                (model_input, self._params),
+                bind_input,
             )) if self._is_async else cursor.execute(
                 query,
-                (model_input, self._params),
+                bind_input,
             )
 
             res = (await cursor.fetchone()) if self._is_async else cursor.fetchone()
@@ -581,10 +588,7 @@ class OracleVSMemory(Memory, Component[OracleVSMemoryConfig]):
             return 
 
         if content.mime_type == MemoryMimeType.IMAGE and self._modality == "IMAGE":
-            buffered = BytesIO()
-            img = content.content.image
-            img.save(buffered, format="JPEG")
-            model_input = buffered.getvalue()
+            model_input = await _image_to_lob(self._connection, content.content.image)
         elif self._modality == "TEXT": 
             model_input = _extract_text(content)
         else:
@@ -596,12 +600,14 @@ class OracleVSMemory(Memory, Component[OracleVSMemoryConfig]):
             cursor.setinputsizes(None, None, oracledb.DB_TYPE_JSON, oracledb.DB_TYPE_JSON, None)
 
             query = f"INSERT INTO {self._table_name} (id, embedding, metadata, model_input) VALUES (:1, dbms_vector_chain.utl_to_embedding(:2,{"'image'," if self._modality=="IMAGE" else ""} json(:3)), :4, :5)"
+            bind_input = [db_id, model_input, self._params, {**content.metadata, "mime_type": content.mime_type.value},  model_input]
+
             (await cursor.execute(
                 query,
-                [db_id, model_input, self._params, {**content.metadata, "mime_type": content.mime_type.value},  model_input],
+                bind_input,
             )) if self._is_async else cursor.execute(
                 query,
-                [db_id, model_input, self._params, {**content.metadata, "mime_type": content.mime_type.value},  model_input],
+                bind_input,
             )
 
             (await self._connection.commit()) if self._is_async else self._connection.commit()
@@ -614,7 +620,6 @@ class OracleVSMemory(Memory, Component[OracleVSMemoryConfig]):
         filter: Optional[FilterGroup] = None,
         **kwargs: Any,
     ) -> MemoryQueryResult:
-        #TODO Query should match model modality, but also doesnt have to match db vector modality - multimodal models
 
         await self._ensure_initialized()
 
@@ -623,17 +628,11 @@ class OracleVSMemory(Memory, Component[OracleVSMemoryConfig]):
             return MemoryQueryResult(results=[]) 
 
         if self._modality == "IMAGE":
-            # add with utl_embedding
-            if not (isinstance(query,MemoryContent) and query.content.mime_type == MemoryMimeType.IMAGE):
-                raise ValueError("NOT CORRECT TYPE")
-            buffered = BytesIO()
-            img = query.content.image
-            img.save(buffered, format="JPEG")
-            model_input = buffered.getvalue()
+            if not (isinstance(query,MemoryContent) and query.mime_type == MemoryMimeType.IMAGE):
+                raise ValueError("Image models can only be queried with MemoryContent")
+            model_input = await _image_to_lob(self._connection, query.content.image)
         elif self._modality == "TEXT": 
             model_input = _extract_text(query)
-        else:
-            raise ValueError("NOT CORRECT TYPE")
 
         if filter is not None:
             where_clause = _generate_where_clause(filter)
@@ -652,7 +651,9 @@ class OracleVSMemory(Memory, Component[OracleVSMemoryConfig]):
             FETCH APPROX FIRST {self._k} ROWS ONLY
             """
 
-            (await cursor.execute(query, [model_input, self._params])) if self._is_async else cursor.execute(query, [model_input, self._params])
+            bind_input = [model_input, self._params]
+
+            (await cursor.execute(query, bind_input)) if self._is_async else cursor.execute(query, bind_input)
 
             results = (await cursor.fetchall()) if self._is_async else cursor.fetchall()
 
@@ -674,7 +675,21 @@ class OracleVSMemory(Memory, Component[OracleVSMemoryConfig]):
                 if mime_type == MemoryMimeType.JSON:
                     doc = json.loads(await self._get_clob_value(result[1]))
                 elif mime_type == MemoryMimeType.IMAGE:
-                    raise NotImplementedError
+                    # TODO: Should we expect images smaller than 1GB always - https://python-oracledb.readthedocs.io/en/latest/user_guide/lob_data.html#streaming-lobs-read
+                    image_bytes = b""
+                    offset = 1
+                    num_bytes_in_chunk = 65536  
+                    while True:
+                        data = (await result[1].read(offset, num_bytes_in_chunk)) if self._is_async else result[1].read(offset, num_bytes_in_chunk)
+                        if data:
+                            image_bytes += data 
+                        if len(data) < num_bytes_in_chunk:
+                            break
+                        offset += len(data)
+
+                    image_stream = io.BytesIO(image_bytes)
+
+                    doc = Image.from_pil(PILImage.open(image_stream))
 
                 # Create MemoryContent
                 content = MemoryContent(

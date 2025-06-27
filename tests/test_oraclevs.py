@@ -11,14 +11,18 @@ from typing import AsyncGenerator
 from typing import (
     AsyncGenerator,
     Tuple,
-    Dict 
+    Dict,
+    List
 )
+from PIL import Image as PILImage
+from autogen_core import Image
 
 # Skip all tests if oracledb is not available
 try:
     import oracledb  # pyright: ignore[reportUnusedImport]
 except ImportError:
     pytest.skip("oracledb not available", allow_module_level=True)
+    
 
 username = "user"
 password = "user"
@@ -262,6 +266,191 @@ async def txt_sync_pool_config() -> AsyncGenerator[Tuple[OracleVSMemoryConfig, O
         await drop_table_purge(_conn, "mytable2")
 
     connection.close()
+
+@pytest_asyncio.fixture()
+async def txt_oci_config() -> AsyncGenerator[OracleVSMemoryConfig]:
+    """Base configuration."""
+
+    connection = await oracledb.connect_async(user=username, password=password, dsn=dsn)
+
+    config=OracleVSMemoryConfig(
+        client=connection,
+        params = {
+            "provider"       : "ocigenai",
+            "credential_name": "OCI_CRED",
+            "url"            : "https://inference.generativeai.us-chicago-1.oci.oraclecloud.com/20231130/actions/embedText",
+            "model"          : "cohere.embed-english-v3.0",
+            "batch_size"     : 10
+        },
+        table_name="mytable",
+        modality="TEXT",
+        distance_strategy="cosine",
+    )
+
+    yield config
+
+    await drop_table_purge(connection, "mytable")
+    await connection.close()
+
+@pytest_asyncio.fixture()
+async def txt_oci_sync_config() -> AsyncGenerator[OracleVSMemoryConfig]:
+    """Base configuration."""
+
+    connection = oracledb.connect(user=username, password=password, dsn=dsn)
+
+    config=OracleVSMemoryConfig(
+        client=connection,
+        params = {
+            "provider"       : "ocigenai",
+            "credential_name": "OCI_CRED",
+            "url"            : "https://inference.generativeai.us-chicago-1.oci.oraclecloud.com/20231130/actions/embedText",
+            "model"          : "cohere.embed-english-v3.0",
+            "batch_size"     : 10
+        },
+        table_name="mytable",
+        modality="TEXT",
+        distance_strategy="cosine",
+    )
+
+    yield config
+
+    await drop_table_purge(connection, "mytable")
+    connection.close()
+
+@pytest_asyncio.fixture()
+async def txt_cohere_config() -> AsyncGenerator[OracleVSMemoryConfig]:
+    """Base configuration."""
+
+    connection = await oracledb.connect_async(user=username, password=password, dsn=dsn)
+
+    config=OracleVSMemoryConfig(
+        client=connection,
+        params = {
+            "provider"       : "cohere",
+            "credential_name": "COHERE_CRED",
+            "url"            : "https://api.cohere.ai/v1/embed",
+            "model"          : "embed-english-light-v3.0",
+            "input_type"     : "search_query"
+        },
+        table_name="mytable",
+        modality="TEXT",
+        distance_strategy="cosine",
+        proxy="www-proxy-ash7.us.oracle.com:80"
+    )
+
+
+    yield config
+
+    await drop_table_purge(connection, "mytable")
+    await connection.close()
+
+@pytest_asyncio.fixture()
+async def multimodal_cohere_config() -> AsyncGenerator[Tuple[OracleVSMemoryConfig, OracleVSMemoryConfig]]:
+    """Base configuration."""
+
+    connection = await oracledb.connect_async(user=username, password=password, dsn=dsn)
+
+    config=OracleVSMemoryConfig(
+        client=connection,
+        params = {
+            "provider"       : "cohere",
+            "credential_name": "COHERE_CRED",
+            "url"            : "https://api.cohere.ai/v2/embed",
+            "model"          : "embed-v4.0",
+        },
+        table_name="mytable",
+        modality="IMAGE",
+        distance_strategy="cosine",
+        proxy="www-proxy-ash7.us.oracle.com:80",
+        k=1
+    )
+
+    config2=OracleVSMemoryConfig(
+        client=connection,
+        params = {
+            "provider"       : "cohere",
+            "credential_name": "COHERE_CRED",
+            "url"            : "https://api.cohere.ai/v2/embed",
+            "model"          : "embed-v4.0",
+        },
+        table_name="mytable",
+        modality="TEXT",
+        distance_strategy="cosine",
+        proxy="www-proxy-ash7.us.oracle.com:80",
+        k=1
+    )
+
+
+    yield config,config2
+
+    await drop_table_purge(connection, "mytable")
+    await connection.close()
+
+
+@pytest_asyncio.fixture()
+async def image_cohere_config() -> AsyncGenerator[OracleVSMemoryConfig]:
+    """Base configuration."""
+
+    connection = await oracledb.connect_async(user=username, password=password, dsn=dsn)
+
+    config=OracleVSMemoryConfig(
+        client=connection,
+        params = {
+            "provider"       : "cohere",
+            "credential_name": "COHERE_CRED",
+            "url"            : "https://api.cohere.ai/v2/embed",
+            "model"          : "embed-v4.0",
+        },
+        table_name="mytable",
+        modality="IMAGE",
+        distance_strategy="cosine",
+        proxy="www-proxy-ash7.us.oracle.com:80",
+        k=1
+    )
+
+    yield config
+
+    await drop_table_purge(connection, "mytable")
+    await connection.close()
+
+@pytest_asyncio.fixture()
+async def image_cohere_sync_config() -> AsyncGenerator[OracleVSMemoryConfig]:
+    """Base configuration."""
+
+    connection = oracledb.connect(user=username, password=password, dsn=dsn)
+
+    config=OracleVSMemoryConfig(
+        client=connection,
+        params = {
+            "provider"       : "cohere",
+            "credential_name": "COHERE_CRED",
+            "url"            : "https://api.cohere.ai/v2/embed",
+            "model"          : "embed-v4.0",
+        },
+        table_name="mytable",
+        modality="IMAGE",
+        distance_strategy="cosine",
+        proxy="www-proxy-ash7.us.oracle.com:80",
+        k=1
+    )
+
+    yield config
+
+    await drop_table_purge(connection, "mytable")
+    connection.close()
+
+@pytest.fixture
+def img_data() -> Tuple[List, Dict]:
+    return ([
+        {"fruit_type": "apple", "url": "resources/42126750_9579e4e830_z.jpg"},
+        {"fruit_type": "strawberry", "url": "resources/18646827786_9f316d4cd1_z.jpg"},
+        {"fruit_type": "watermelon", "url": "resources/4688473695_452e494f5c_z.jpg"},
+    ], {"fruit_type": "watermelon", "url": "resources/5055320652_e126cac865_z.jpg"})
+
+# =============================================================================
+# TESTS
+# =============================================================================
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('txt_config', ['txt_config', 'txt_sync_config'], indirect=True)
@@ -747,3 +936,95 @@ async def test_cancellation(txt_config: OracleVSMemoryConfig) -> None:
 
     results = await memory.query("Tell me about Paris", cancellation_token = token)
     assert len(results.results) == 0
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('txt_oci_config', ['txt_oci_config', 'txt_oci_sync_config'], indirect=True)
+async def test_oci_workflow(txt_oci_config: OracleVSMemoryConfig) -> None:
+    """Test basic query"""
+    memory = OracleVSMemory(txt_oci_config)
+    await memory.clear()
+
+    results = await memory.query("Tell me about Paris")
+    assert len(results.results) == 0
+
+    await memory.add(
+        MemoryContent(
+            content="Paris is known for the Eiffel Tower and amazing cuisine.",
+            mime_type=MemoryMimeType.TEXT,
+            metadata={"category": "city", "country": "France"},
+        )
+    )
+
+    results = await memory.query("Tell me about Paris")
+    assert len(results.results) > 0
+    assert any("Paris" in str(r.content) for r in results.results)
+    assert all(isinstance(r.metadata.get("distance"), float) for r in results.results if r.metadata)
+
+@pytest.mark.asyncio
+async def test_cohere_workflow(txt_cohere_config: OracleVSMemoryConfig) -> None:
+    """Test basic query"""
+    memory = OracleVSMemory(txt_cohere_config)
+    await memory.clear()
+
+    results = await memory.query("Tell me about Paris")
+    assert len(results.results) == 0
+
+    await memory.add(
+        MemoryContent(
+            content="Paris is known for the Eiffel Tower and amazing cuisine.",
+            mime_type=MemoryMimeType.TEXT,
+            metadata={"category": "city", "country": "France"},
+        )
+    )
+
+    results = await memory.query("Tell me about Paris")
+    assert len(results.results) > 0
+    assert any("Paris" in str(r.content) for r in results.results)
+    assert all(isinstance(r.metadata.get("distance"), float) for r in results.results if r.metadata)
+
+@pytest.mark.asyncio 
+@pytest.mark.parametrize('image_cohere_config', ['image_cohere_config', 'image_cohere_sync_config'], indirect=True)
+async def test_cohere_image_workflow(image_cohere_config: OracleVSMemoryConfig, img_data: Tuple[List, Dict]) -> None:
+    """Test basic query"""
+    memory = OracleVSMemory(image_cohere_config)
+    await memory.clear()
+
+    for doc in img_data[0]:
+        await memory.add(
+            MemoryContent(
+                content= Image.from_pil(PILImage.open(doc["url"])),
+                mime_type=MemoryMimeType.IMAGE,
+                metadata={"fruit_type": doc["fruit_type"]},
+            )
+        )
+
+    results = await memory.query(MemoryContent(
+                content= Image.from_pil(PILImage.open(img_data[1]["url"])),
+                mime_type=MemoryMimeType.IMAGE
+            )
+    )
+
+    assert len(results.results) == 1
+    assert results.results[0].metadata.get("fruit_type") == img_data[1]["fruit_type"]
+
+@pytest.mark.asyncio
+async def test_cohere_multimodal_workflow(multimodal_cohere_config: Tuple[OracleVSMemoryConfig, OracleVSMemoryConfig], img_data: Tuple[List, Dict]) -> None:
+    """Test basic query"""
+    memory = OracleVSMemory(multimodal_cohere_config[0])
+    await memory.clear()
+
+    for doc in img_data[0]:
+        await memory.add(
+            MemoryContent(
+                content= Image.from_pil(PILImage.open(doc["url"])),
+                mime_type=MemoryMimeType.IMAGE,
+                metadata={"fruit_type": doc["fruit_type"]},
+            )
+        )
+
+    memory_txt = OracleVSMemory(multimodal_cohere_config[1])
+
+    results = await memory_txt.query("A photo of a strawberry")
+
+    assert len(results.results) == 1
+    assert results.results[0].metadata.get("fruit_type") == "strawberry"
